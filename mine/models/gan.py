@@ -25,7 +25,6 @@ class GAN(pl.LightningModule):
         super().__init__()
 
         self.input_dim = input_dim
-        self.device = device
 
         self.generator_type = generator_type
 
@@ -49,6 +48,7 @@ class GAN(pl.LightningModule):
         self.beta = kwargs['beta']
         self.train_loader = kwargs['train_loader']
         self.lr = kwargs['lr']
+        self.automatic_optimization = False  # disable automatic optimization
 
         self.generated = None
         self.conditional_dim = conditional_dim
@@ -130,7 +130,7 @@ class GAN(pl.LightningModule):
 
         return X, generated
 
-    def training_step(self, batch, batch_idx, optimizer_idx):
+    def training_step(self, batch, batch_idx):
         if len(batch) == 2:
             x_real, conditional = batch
         else:
@@ -148,61 +148,45 @@ class GAN(pl.LightningModule):
         valid = torch.ones((x_real.shape[0], 1)).to(self.device)
         fake = torch.zeros((x_real.shape[0], 1)).to(self.device)
 
-        g_loss = 0
-        d_loss = 0
+        opt_g, opt_d = self.optimizers()
 
-        if optimizer_idx == 0:
-            # Generator
-            z = self.sample_z(x_real.shape[0], conditional)
-            self.generated = self.generator(z)
-            generated_disc = self.discriminator(self.generated)
+        # ====== update generator ======
+        z = self.sample_z(x_real.shape[0], conditional)
+        self.generated = self.generator(z)
+        generated_disc = self.discriminator(self.generated)
 
-            conditional, generated = self.mi_input(
-                self.generated, conditional, z)
+        conditional, generated = self.mi_input(self.generated, conditional, z)
+        if conditional is not None:
+            mi = self.mi_estimator(generated, conditional)
+        else:
+            mi = 0
 
-            if conditional is not None:
-                mi = self.mi_estimator(generated, conditional)
-            else:
-                mi = 0
+        generator_loss = self.loss(generated_disc, valid)
+        g_loss = generator_loss + self.beta * mi
 
-            generator_loss = self.loss(generated_disc, valid)
-            g_loss = generator_loss + self.beta * mi
+        opt_g.zero_grad()
+        self.manual_backward(g_loss)
+        adaptive_gradient_clipping_(self.generator, self.mi_estimator)
+        opt_g.step()
 
-            adaptive_gradient_clipping_(self.generator, self.mi_estimator)
+        self.log("g_loss", g_loss, prog_bar=True, on_epoch=True)
 
-            tqdm_dict = {
-                'g_loss': g_loss
-            }
+        # ====== update discriminator ======
+        disc_real = self.discriminator(x_real)
+        if self.smoothing:
+            valid = valid - 0.3*torch.rand(valid.shape).to(self.device)
+        loss_real = self.loss(disc_real, valid)
 
-            output = {
-                'loss': g_loss,
-                'progress_bar': tqdm_dict,
-                'log': tqdm_dict
-            }
+        disc_fake = self.discriminator(self.generated.detach())
+        loss_fake = self.loss(disc_fake, fake)
 
-        elif optimizer_idx == 1:
-            # Discriminator
-            disc_real = self.discriminator(x_real)
-            if self.smoothing:
-                valid = valid - 0.3*torch.rand(valid.shape).to(self.device)
-            loss_real = self.loss(disc_real, valid)
+        d_loss = 0.5 * (loss_real + loss_fake)
 
-            disc_fake = self.discriminator(self.generated.detach())
-            loss_fake = self.loss(disc_fake, fake)
+        opt_d.zero_grad()
+        self.manual_backward(d_loss)
+        opt_d.step()
 
-            d_loss = 0.5 * (loss_real + loss_fake)
-
-            tqdm_dict = {
-                'd_loss': d_loss
-            }
-
-            output = {
-                'loss': d_loss,
-                'progress_bar': tqdm_dict,
-                'log': tqdm_dict
-            }
-
-        return output
+        self.log("d_loss", d_loss, prog_bar=True, on_epoch=True)
 
     def plot_img(self, batch, batch_idx):
         x, c = batch
@@ -212,6 +196,5 @@ class GAN(pl.LightningModule):
         plt.figure()
         plt.imshow(generated[0].cpu().data.numpy())
 
-    @pl.data_loader
     def train_dataloader(self):
         return self.train_loader

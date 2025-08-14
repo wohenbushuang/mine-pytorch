@@ -4,7 +4,7 @@ import torch.nn as nn
 import numpy as np
 import abc
 
-from datasets import load_dataloader
+from mine.datasets import load_dataloader
 from mine.models.mine import T, Mine
 from mine.models.gan import LinearGenerator, LinearDiscriminator
 import pytorch_lightning as pl
@@ -48,7 +48,6 @@ class BiGANDiscriminator(nn.Module):
 class BiGAN(pl.LightningModule):
     def __init__(self, latent_dim, img_dim, mi_estimator, lr, beta=0, device='cpu', dataset='gaussians'):
         super().__init__()
-        self.device = device
         self.dataset = dataset
 
         self.latent_dim = latent_dim
@@ -60,6 +59,7 @@ class BiGAN(pl.LightningModule):
 
         self.beta = beta
         self.lr = lr
+        self.automatic_optimization = False  # disable automatic optimization
 
         self.loss = nn.BCELoss()
 
@@ -77,7 +77,7 @@ class BiGAN(pl.LightningModule):
     def forward(self, z):
         return self.generator(z)
 
-    def training_step(self, batch, batch_idx, optimizer_idx):
+    def training_step(self, batch, batch_idx):
 
         x_real, _ = batch
 
@@ -90,54 +90,45 @@ class BiGAN(pl.LightningModule):
         valid = torch.ones((x_real.shape[0], 1)).to(self.device)
         fake = torch.zeros((x_real.shape[0], 1)).to(self.device)
 
-        if optimizer_idx == 0:
-            self.z = self.sample_z(x_real.shape[0])
-            # Generator
-            self.generated = self.generator(self.z)
-            generator_loss = self.loss(
-                self.discriminator(self.z, self.generated), valid)
+        opt_g, opt_d = self.optimizers()
 
-            # Encoder
-            self.encoded = self.encoder(x_real)
-            encoder_loss = self.loss(
-                self.discriminator(self.encoded, x_real), fake)
+        # ====== update generator ======
+        self.z = self.sample_z(x_real.shape[0])
+        # Generator
+        self.generated = self.generator(self.z)
+        generator_loss = self.loss(
+            self.discriminator(self.z, self.generated), valid)
 
-            # MI
-            mi_loss = self.mi_estimator(x_real, self.encoded)
+        # Encoder
+        self.encoded = self.encoder(x_real)
+        encoder_loss = self.loss(
+            self.discriminator(self.encoded, x_real), fake)
 
-            loss = generator_loss + encoder_loss + self.beta * mi_loss
+        # MI
+        mi_loss = self.mi_estimator(x_real, self.encoded)
 
-            tqdm_dict = {
-                'g_loss': loss
-            }
+        loss = generator_loss + encoder_loss + self.beta * mi_loss
 
-        # Discriminator
-        if optimizer_idx == 1:
-            discriminator_loss_real = self.loss(
-                self.discriminator(self.encoded.detach(), x_real), valid)
-            discriminator_loss_fake = self.loss(
-                self.discriminator(self.z, self.generated.detach()), fake)
+        opt_g.zero_grad()
+        self.manual_backward(loss)
+        opt_g.step()
 
-            loss = .5 * \
-                (discriminator_loss_fake + discriminator_loss_real)
+        self.log("g_loss", loss, prog_bar=True, on_epoch=True)
 
-            tqdm_dict = {
-                'd_loss': loss
-            }
+        # ====== update discriminator ======
+        discriminator_loss_real = self.loss(
+            self.discriminator(self.encoded.detach(), x_real), valid)
+        discriminator_loss_fake = self.loss(
+            self.discriminator(self.z, self.generated.detach()), fake)
 
-        output = {
-            'loss': loss,
-            'progress_bar': tqdm_dict,
-            'log': tqdm_dict
-        }
+        loss = .5 * \
+            (discriminator_loss_fake + discriminator_loss_real)
 
-        return output
+        self.log("d_loss", loss, prog_bar=True, on_epoch=True)
 
-    @pl.data_loader
     def train_dataloader(self):
         return load_dataloader(self.dataset, 256, train=True)
 
-    # @pl.data_loader
     # def val_dataloader(self):
     #     return load_dataloader('mnist', 256, train=False)
 
@@ -162,7 +153,7 @@ def main(device):
     model = BiGAN(latent_dim=z_dim, img_dim=x_dim,
                   mi_estimator=mi_estimator, lr=lr, beta=beta, device=device, dataset=dataset)
 
-    trainer = Trainer(max_epochs=epochs, gpus=1, early_stop_callback=False)
+    trainer = Trainer(max_epochs=epochs, devices=1)
     trainer.fit(model)
 
 

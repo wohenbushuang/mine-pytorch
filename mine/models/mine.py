@@ -23,7 +23,7 @@ torch.autograd.set_detect_anomaly(True)
 EPS = 1e-6
 
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
-#device = 'cpu'
+# device = 'cpu'
 print("Device:", device)
 
 
@@ -187,19 +187,17 @@ class MutualInformationEstimator(pl.LightningModule):
         x, z = batch
         loss = self.energy_loss(x, z)
 
-        return {
-            'test_loss': loss, 'test_mi': -loss
-        }
+        self.log("test_loss", loss, on_epoch=True, prog_bar=True)
+        self.log("test_mi", -loss, on_epoch=True, prog_bar=True)
+        return loss
 
-    def test_end(self, outputs):
-        avg_mi = torch.stack([x['test_mi']
-                              for x in outputs]).mean().detach().cpu().numpy()
+    def on_test_epoch_end(self):
+        avg_mi = self.trainer.callback_metrics["test_mi"].item()
         tensorboard_logs = {'test_mi': avg_mi}
 
         self.avg_test_mi = avg_mi
         return {'avg_test_mi': avg_mi, 'log': tensorboard_logs}
 
-    @pl.data_loader
     def train_dataloader(self):
         if self.train_loader:
             return self.train_loader
@@ -210,7 +208,6 @@ class MutualInformationEstimator(pl.LightningModule):
             batch_size=self.kwargs['batch_size'], shuffle=True)
         return train_loader
 
-    @pl.data_loader
     def test_dataloader(self):
         if self.test_loader:
             return self.train_loader

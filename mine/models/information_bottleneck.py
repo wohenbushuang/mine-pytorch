@@ -11,6 +11,7 @@ import random
 
 import pytorch_lightning as pl
 from pytorch_lightning import Trainer
+from pytorch_lightning.callbacks import EarlyStopping
 
 
 def batch_misclass_rate(y_pred, y_true):
@@ -122,9 +123,14 @@ class IBNetwork(pl.LightningModule):
         decoded, loss = self.loss_fn(x, y)
         accuracy, misclass_rate = self.get_stats(decoded, y)
 
-        tensorboard_logs = {'val_loss': loss,
-                            'val_accuracy': accuracy,
-                            'val_error_rate': misclass_rate}
+        tensorboard_logs = {
+            "val_loss": loss,
+            "val_accuracy": accuracy,
+            "val_error_rate": misclass_rate,
+        }
+        self.log("val_loss", loss, on_epoch=True, prog_bar=True)
+        self.log("val_accuracy", accuracy, on_epoch=True, prog_bar=True)
+        self.log("val_error_rate", misclass_rate, on_epoch=True, prog_bar=True)
 
         tqdm_dict = {
             'val_accuracy': accuracy
@@ -154,11 +160,9 @@ class IBNetwork(pl.LightningModule):
         tensorboard_logs = {'test_accuracy': avg_acc}
         return {'avg_test_accuracy': avg_acc, 'log': tensorboard_logs}
 
-    @pl.data_loader
     def train_dataloader(self):
         return load_dataloader('mnist', 256, train=True)
 
-    @pl.data_loader
     def val_dataloader(self):
         return load_dataloader('mnist', 256, train=False)
 
@@ -292,12 +296,17 @@ def main(device):
     num_gpus = 1 if device == 'cuda' else 0
 
     t = StatisticsNetwork(x_dim, z_dim, device=device).to(device)
-    mi_estimator = Mine(t, loss='mine').to(device)
+    mi_estimator = Mine(t, loss="mine", method="concat").to(device)
     ibnetwork = IBNetwork(input_dim=28*28, K=K, output_dim=10,
                           mi_estimator=mi_estimator, lr=lr, beta=beta).to(device)
 
-    trainer = Trainer(amp_level='02', max_epochs=epochs,
-                      gpus=num_gpus, early_stop_callback=True)
+    early_stop = EarlyStopping(monitor="val_loss", patience=3, mode="min")
+    trainer = Trainer(
+        precision=16,
+        max_epochs=epochs,
+        devices=num_gpus,
+        callbacks=[early_stop],
+    )
     trainer.fit(ibnetwork)
 
 
